@@ -19,19 +19,16 @@
 
 // Set section alignment to minimize alignment overhead
 
-#if (_MSC_VER < 1300)
-#pragma comment(linker, "/FILEALIGN:0x200")
-#endif
+//#define WIN32_LEAN_AND_MEAN
 
-#define _WIN32_WINNT 0x0500
 #include <windows.h>
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
 #include <assert.h>
 #include <process.h>
-#include <math.h>
-
+//#include <cmath>
+#include <cstdint>
 #define STB_DEFINE
 #include "stb.h"          /*     http://nothings.org/stb.h         */
 
@@ -53,6 +50,28 @@
 #define ALLOW_RECOLORING 0
 #endif
 
+struct Timer
+{
+public:
+   LARGE_INTEGER freq;
+   LARGE_INTEGER start_time;
+
+   Timer()
+   {
+      QueryPerformanceFrequency(&freq);
+      QueryPerformanceCounter(&start_time);
+   }
+
+   float elapsed_ms()
+   {
+      LARGE_INTEGER now;
+      QueryPerformanceCounter(&now);
+      LARGE_INTEGER elapse = { .QuadPart  = now.QuadPart - start_time.QuadPart };
+      elapse.QuadPart *= 1000000;
+      return (float)elapse.QuadPart / (float)freq.QuadPart;
+   }
+};
+
 //#define MONO2
 
 // implement USE_STBI
@@ -62,11 +81,9 @@
 #define STBI_NO_STDIO
 #define STBI_NO_WRITE
 #include "stb_image.c"    /*     http://nothings.org/stb_image.c   */
-#endif 
+#endif
 
 #include "resource.h"
-
-typedef int Bool;
 
 
 // size of border in pixels
@@ -80,7 +97,7 @@ typedef int Bool;
 
 
 
-Bool do_show;
+bool do_show;
 float delay_time = 4;
 int nearest_neighbor = 0; // internal use
 
@@ -91,7 +108,7 @@ int nearest_neighbor = 0; // internal use
 #undef set
 
 // trivial error handling
-void error(char *str) { MessageBox(NULL, str, "imv(stb) error", MB_OK); }
+void error(char *str) { MessageBox(nullptr, str, "imv(stb) error", MB_OK); }
 
 // OutputDebugString with varargs, can be compiled out
 #ifdef _DEBUG
@@ -188,14 +205,14 @@ void wake(int message)
    PostMessage(win, message, 0,0);
 }
 
-typedef struct
+struct Image
 {
    int x,y;         // size of the image
-   int stride;      // distance between rows in bytes  
+   int stride;      // distance between rows in bytes
    int frame;       // does this image have a frame (border)?
    uint8 *pixels;   // pointer to (0,0)th pixel
    int had_alpha;   // did this have alpha and we statically overwrote it?
-} Image;
+};
 
 enum
 {
@@ -229,17 +246,17 @@ enum
 #define MAIN_OWNS(x)   ((x)->status <= LOAD_available)
 
 // data about a specific file
-typedef struct
+struct ImageFile
 {
    char *filename;   // name of the file on disk, must be free()d
-   char *filedata;   // data loaded from disk -- passed from reader to decoder
+   uint8_t *filedata;   // data loaded from disk -- passed from reader to decoder
    int len;          // length of data loaded from disk -- as above
    Image *image;     // cached image -- passed from decoder to main
    char *error;      // error message -- from reader or decoder, must be free()d
    int status;       // current status/ownership with LOAD_* enum
    int bail;         // flag from main thread to work threads indicating to give up
    int lru;          // the larger, the higher priority--effectively a timestamp
-} ImageFile;
+};
 
 // controls for interlocking communications
 stb_mutex cache_mutex, decode_mutex;
@@ -248,14 +265,14 @@ stb_semaphore disk_command_queue;
 stb_sync resize_merge;
 
 // a request communicated from the main thread to the disk-loader task
-typedef struct
+struct DiskCommand
 {
    int num_files;
    ImageFile *files[4];
-} DiskCommand;
+};
 
 // there can only be one pending command in flight
-volatile DiskCommand dc_shared;
+DiskCommand dc_shared;
 
 // the disk loader sits in this loop forever
 void *diskload_task(void *p)
@@ -288,7 +305,7 @@ void *diskload_task(void *p)
          // claim ownership over all the files in the command
          for (i=0; i < dc.num_files; ++i) {
             dc.files[i]->status = LOAD_reading;
-            assert(dc.files[i]->filedata == NULL);
+            assert(dc.files[i]->filedata == nullptr);
          }
          // clear the command so we won't re-process it
          dc_shared.num_files = 0;
@@ -297,8 +314,6 @@ void *diskload_task(void *p)
 
       o(("READ: Got disk request, %d items.\n", dc.num_files));
       for (i=0; i < dc.num_files; ++i) {
-         int n;
-         uint8 *data;
          assert(dc.files[i]->status == LOAD_reading);
 
          // check if the main thread changed its mind about this
@@ -311,25 +326,26 @@ void *diskload_task(void *p)
             dc.files[i]->status = LOAD_inactive;
          } else {
             o(("READ: Loading file %s\n", dc.files[i]->filename));
-            assert(dc.files[i]->filedata == NULL);
+            assert(dc.files[i]->filedata == nullptr);
 
+            size_t n;
             // read the data
-            data = stb_file(dc.files[i]->filename, &n);
-         
+            uint8_t *data = static_cast<uint8_t *>(stb_file(dc.files[i]->filename, &n));
+
             // update the results
             // don't need to mutex these, because we own them via ->status
-            if (data == NULL) {
+            if (data == nullptr) {
                o(("READ: error reading\n"));
-               dc.files[i]->error = strdup("can't open");
-               dc.files[i]->filedata = NULL;
+               dc.files[i]->error = _strdup("can't open");
+               dc.files[i]->filedata = nullptr;
                dc.files[i]->len = 0;
                barrier();
                dc.files[i]->status = LOAD_error_reading;
                wake(WM_APP_LOAD_ERROR); // wake main thread to react to error
             } else {
                o(("READ: Successfully read %d bytes\n", n));
-               dc.files[i]->error = NULL;
-               assert(dc.files[i]->filedata == NULL);
+               dc.files[i]->error = nullptr;
+               assert(dc.files[i]->filedata == nullptr);
                dc.files[i]->filedata = data;
                dc.files[i]->len = n;
                barrier();
@@ -472,13 +488,13 @@ void make_image(Image *z, int image_x, int image_y, uint8 *image_data, BOOL imag
 
 // no idea if it needs to be volatile, decided not to worry about proving
 // it one way or the other
-volatile ImageFile cache[MAX_CACHED_IMAGES];
+ImageFile cache[MAX_CACHED_IMAGES];
 
 // choose which image to decode and claim ownership
 volatile ImageFile *decoder_choose(void)
 {
    int i, best_lru=0;
-   volatile ImageFile *best = NULL;
+   volatile ImageFile *best = nullptr;
 
    // if we get unlucky we may have to bail and start over
 start:
@@ -499,7 +515,7 @@ start:
    // in diskload_task of how it's possible for a task to be woken
    // from the sem_release() without there being a pending command.
    if (best) {
-      int retry = FALSE;
+      bool retry = false;
       // if there is a best one, it's possible that while iterating
       // it was flushed by the main thread. so let's make sure it's
       // still ready to decode. (Of course it ALSO could have changed
@@ -510,7 +526,7 @@ start:
          if (best->status == LOAD_reading_done)
             best->status = LOAD_decoding;
          else
-            retry = TRUE;
+            retry = true;
       }
       stb_mutex_end(cache_mutex);
       // if the status changed out from under us, try again
@@ -520,7 +536,7 @@ start:
    return best;
 }
 
-static uint8 *imv_decode_from_memory(uint8 *mem, int len, int *x, int *y, BOOL *loaded_as_rgb, int *n, int n_req, char *filename);
+static uint8_t *imv_decode_from_memory(uint8_t *mem, int len, int *x, int *y, bool *loaded_as_rgb, int *n, int n_req, char *filename);
 static char  *imv_failure_reason(void);
 
 void *decode_task(void *p)
@@ -530,14 +546,15 @@ void *decode_task(void *p)
       // find the best image to decode
       volatile ImageFile *f = decoder_choose();
 
-      if (f == NULL) {
+      if (f == nullptr) {
          // wait for load thread to wake us
          o(("DECODE: blocking\n"));
          stb_sem_waitfor(decode_queue);
          o(("DECODE: woken\n"));
       } else {
-         int x,y,loaded_as_rgb,n;
-         uint8 *data;
+         int x,y,n;
+         bool loaded_as_rgb = true;
+         uint8_t *data;
          assert(f->status == LOAD_decoding);
 
          // decode image
@@ -547,11 +564,11 @@ void *decode_task(void *p)
 
          // free copy of data from disk, which we don't need anymore
          free(f->filedata);
-         f->filedata = NULL;
+         f->filedata = nullptr;
 
-         if (data == NULL) {
+         if (data == nullptr) {
             // error reading file, record the reason for it
-            f->error = strdup(imv_failure_reason());
+            f->error = _strdup(imv_failure_reason());
             barrier();
             f->status = LOAD_error_reading;
             // wake up the main thread in case this is the most recent image
@@ -571,20 +588,20 @@ void *decode_task(void *p)
 }
 
 // the image cache entry currently trying to be displayed (may be waiting on resizer)
-ImageFile *source_c;
+ImageFile *source_c = nullptr;
 // the image currently being displayed--historically redundant to source_c->image
-Image *source;
+Image *source = nullptr;
 
 // allocate an image in windows-friendly format
 Image *bmp_alloc(int x, int y)
 {
-   Image *i = malloc(sizeof(*i));
+   Image *i = (Image *)malloc(sizeof(*i));
    if (!i) return NULL;
    i->x = x;
    i->y = y;
    i->stride = x*BPP;
    i->stride += (-i->stride) & 3;
-   i->pixels = malloc(i->stride * i->y);
+   i->pixels = (uint8_t*) malloc(i->stride * i->y);
    i->frame = 0;
    i->had_alpha = 0;
    if (i->pixels == NULL) { free(i); return NULL; }
@@ -653,11 +670,13 @@ int upsample_cubic = TRUE;
 int cur_loc = -1; // offset within the current list of files
 
 // information about files we have currently loaded
-struct
+struct FileInfo
 {
    char *filename;
    int lru;
-} *fileinfo;
+};
+
+STB__ARR(FileInfo) fileinfo;
 
 // declare with extra bytes so we can print the version number into it
 char helptext_center[150] =
@@ -727,13 +746,13 @@ char display_error[1024];
 void set_error(volatile ImageFile *z)
 {
    sprintf(display_error, "File:\n%s\nError:\n%s\n", z->filename, z->error);
-   InvalidateRect(win, NULL, FALSE);
+   InvalidateRect(win, nullptr, FALSE);
    imfree(cur);
-   cur = NULL;
+   cur = nullptr;
    free(cur_filename);
-   cur_filename = strdup(z->filename);
+   cur_filename = _strdup(z->filename);
    source_c = (ImageFile *) z;
-   source = NULL;
+   source = nullptr;
 }
 
 HFONT label_font;
@@ -746,20 +765,23 @@ void build_label_font(void)
    lf.lfHeight       = label_font_height;
    lf.lfOutPrecision = OUT_TT_PRECIS; // prefer truetype to raster fonts
    strcpy(lf.lfFaceName, "Times New Roman");
-   if (label_font) DeleteObject(label_font);
+   if (label_font)
+   {
+      DeleteObject(label_font);
+   }
    label_font = CreateFontIndirect(&lf);
 }
 
 char path_to_file[4096];
 int show_frame = TRUE;   // show border or not?
-int show_label = FALSE;  // display the help text or not
-int recursive = FALSE;
+bool show_label = false;  // display the help text or not
+bool recursive = false;
 
 // WM_PAINT, etc.
 void display(HWND win, HDC hdc)
 {
    RECT rect,r2;
-   HBRUSH b = GetStockObject(BLACK_BRUSH);
+   HBRUSH b = (HBRUSH)GetStockObject(BLACK_BRUSH);
    int w,h,x,y;
 
    // get the window size for centering
@@ -802,10 +824,11 @@ void display(HWND win, HDC hdc)
    if (show_label) {
       SIZE size;
       RECT z;
-      HFONT old = NULL;
+      HFONT old = nullptr;
       char buffer[1024];
       char *name = cur_filename ? cur_filename : "(none)";
-      if (fileinfo) {
+      if (fileinfo)
+      {
          if (recursive)
             sprintf(buffer, "%s ( %d / %d - %s)", name, cur_loc+1, stb_arr_len(fileinfo), path_to_file);
          else
@@ -813,7 +836,10 @@ void display(HWND win, HDC hdc)
          name = buffer;
       }
 
-      if (label_font) old = SelectObject(hdc, label_font);
+      if (label_font)
+      {
+         old = (HFONT)SelectObject(hdc, label_font);
+      }
 
       // get rect around label so we can draw it ourselves, because
       // the DrawText() one is poorly sized
@@ -828,7 +854,10 @@ void display(HWND win, HDC hdc)
       z.bottom -= 2; // extra padding on bottom because it's at edge of window
       SetTextColor(hdc, RGB(255,255,255));
       DrawText(hdc, name, -1, &z, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-      if (old) SelectObject(hdc, old);
+      if (old)
+      {
+         SelectObject(hdc, old);
+      }
    }
 
    if (show_help) {
@@ -858,32 +887,32 @@ void display(HWND win, HDC hdc)
    }
 }
 
-typedef struct
+struct QueuedSize
 {
    int x,y;
    int w,h;
-} queued_size;
+};
 
 // most recent unsatisfied resize request (private to main thread)
-queued_size qs;
+QueuedSize qs;
 
 // active resize request, mainly just used by main thread (resize
 // thread writes to 'image' field.
 struct
 {
-   queued_size size;
+   QueuedSize size;
    Image *image;
    char *filename;
    ImageFile *image_c;
 } pending_resize;
 
 // temporary structure for communicating across stb_workq() call
-typedef struct
+struct Resize
 {
    ImageFile *src;
    Image dest;
    Image *result;
-} Resize;
+};
 
 // threaded image resizer, uses work queue AND current thread
 void image_resize(Image *dest, Image *src);
@@ -926,26 +955,29 @@ void compute_size(int gw, int gh, int sw, int sh, int *ox, int *oy)
 // we still use the work queue to accelerate, if possible)
 void queue_resize(int w, int h, ImageFile *src_c, int immediate)
 {
-   static Resize res; // must be static because we expose (very briefly) to other thread
    Image *src = src_c->image;
-   Image *dest;
+
    int w2,h2;
 
    if (!immediate) assert(pending_resize.size.w);
-   if (src_c == NULL) return;
+   if (src_c == nullptr) return;
 
    // create (w2,h2) matching aspect ratio of w/h
    compute_size(w,h,src->x+FRAME*2,src->y+FRAME*2,&w2,&h2);
 
    // create output of the appropriate size
-   dest = bmp_alloc(w2+FRAME*2,h2+FRAME*2);
+   Image *dest = bmp_alloc(w2+FRAME*2,h2+FRAME*2);
    assert(dest);
-   if (!dest) return;
+   if (dest == nullptr)
+   {
+      return;
+   }
 
    // encode the border around it
    frame(dest);
 
    // build the parameter list for image_resize
+   static Resize res; // must be static because we expose (very briefly) to other thread
    res.src = src_c;
    res.dest = image_region(dest, FRAME, FRAME, w2, h2);
    res.result = dest;
@@ -955,14 +987,14 @@ void queue_resize(int w, int h, ImageFile *src_c, int immediate)
       // so there's no thread issues here)
       src_c->status = LOAD_resizing;
       // store data to come back for later
-      pending_resize.image = NULL;
+      pending_resize.image = nullptr;
       pending_resize.image_c = src_c;
-      pending_resize.filename = strdup(src_c->filename);
+      pending_resize.filename = _strdup(src_c->filename);
       // run the resizer in the background (equivalent to the call below)
-      stb_workq(resize_workers, work_resize, &res, &pending_resize.image);
+      stb_workq(resize_workers, work_resize, &res, (volatile void**)&pending_resize.image);
    } else {
       // run the resizer in the main thread
-      pending_resize.image = work_resize(&res);
+      pending_resize.image = (Image *)work_resize(&res);
    }
 }
 
@@ -974,8 +1006,8 @@ void enqueue_resize(int left, int top, int width, int height)
       // dragging one side of the image out wider), just immediately update the window
       qs.w = 0; // clear the queue
       if (!show_frame) left += FRAME, top += FRAME, width -= 2*FRAME, height -= 2*FRAME;
-      MoveWindow(win, left, top, width, height, TRUE);
-      InvalidateRect(win, NULL, FALSE);
+      MoveWindow(win, left, top, width, height, true);
+      InvalidateRect(win, nullptr, FALSE);
    } else {
       // otherwise store the most recent request for processing in the main thread
       qs.x = left;
@@ -1143,7 +1175,7 @@ void size_to_current(int maximize)
 
       // build the new one
       cur = bmp_alloc(w2,h2);
-      cur_filename = strdup(source_c->filename);
+      cur_filename = _strdup(source_c->filename);
       // build a frame around the data
       frame(cur);
       // copy the raw data in
@@ -1158,8 +1190,8 @@ void size_to_current(int maximize)
       if (!show_frame) x+=FRAME,y+=FRAME,w-=FRAME*2,h-=FRAME*2;
 
       // move/show it
-      MoveWindow(win, x,y,w,h, TRUE);
-      InvalidateRect(win, NULL, FALSE);
+      MoveWindow(win, x,y,w,h, true);
+      InvalidateRect(win, nullptr, FALSE);
    } else {
       // not 1:1; it requires resizing, so queue a resize request
       qs.x = x;
@@ -1187,7 +1219,7 @@ void toggle_frame(void)
       rect.top += FRAME;
       rect.bottom -= FRAME;
    }
-   SetWindowPos(win, NULL, rect.left, rect.top, rect.right-rect.left, rect.bottom-rect.top, SWP_NOCOPYBITS|SWP_NOOWNERZORDER);
+   SetWindowPos(win, nullptr, rect.left, rect.top, rect.right-rect.left, rect.bottom-rect.top, SWP_NOCOPYBITS|SWP_NOOWNERZORDER);
 }
 
 // the most recent image we've seen
@@ -1204,13 +1236,14 @@ void update_source(ImageFile *q)
       best_lru = q->lru;
 
    if (source)
-      size_to_current(FALSE); // don't maximize
+      size_to_current(false); // don't maximize
 }
 
 // toggle between the two main display modes
 void toggle_display(void)
 {
-   if (source) {
+   if (source)
+   {
       display_mode = (display_mode + 1) % DISPLAY__num;
       size_to_current(TRUE); // _DO_ maximize if DISPLAY_current
    }
@@ -1237,7 +1270,7 @@ void free_fileinfo(void)
    for (i=0; i < stb_arr_len(fileinfo); ++i)
       free(fileinfo[i].filename); // allocated by stb_readdir
    stb_arr_free(fileinfo);
-   fileinfo = NULL;
+   fileinfo = nullptr;
 }
 
 //derived from michael herf's code: http://www.stereopsis.com/strcmp4humans.html
@@ -1287,8 +1320,8 @@ int StringCompare(char *a, char *b)
 
 	if (a == b) return 0;
 
-	if (a == NULL) return -1;
-	if (b == NULL) return 1;
+	if (a == nullptr) return -1;
+	if (b == nullptr) return 1;
 
 	while (*a && *b) {
 
@@ -1325,7 +1358,7 @@ int StringCompare(char *a, char *b)
 	{
       // if strings differ only by leading 0s, use case-insensitive ASCII sort
       // (note, we should work this out more efficiently by noticing which one changes length first)
-      int z = stricmp(orig_a, orig_b);
+      int z = _stricmp(orig_a, orig_b);
       if (z) return z;
       // if identical case-insensitive, return ASCII sort
       return strcmp(orig_a, orig_b);
@@ -1342,43 +1375,46 @@ char *open_filter = "Image Files\0*.jpg;*.jpeg;*.png;*.bmp;*.tga;*.hdr;*.spk\0";
 // build a filelist for the current directory
 void init_filelist(void)
 {
-   char **image_files; // stb_arr (dynamic array type) of filenames
-   char *to_free = NULL; 
+   char *to_free = nullptr;
    int i;
    if (fileinfo) {
       // cache the current filename so we can look for it in the list below
       // @BUG: is this leaking the old filename?
-      filename = to_free = strdup(fileinfo[cur_loc].filename);
+      filename = to_free = _strdup(fileinfo[cur_loc].filename);
       free_fileinfo();
    }
 
+   STB__ARR(char*) image_files = nullptr; // stb_arr (dynamic array type) of filenames
    if (recursive)
       image_files = stb_readdir_recursive(path_to_file, open_filter + 12);
    else
       image_files = stb_readdir_files_mask(path_to_file, open_filter + 12);
 
-   if (image_files == NULL) { error("Error: couldn't read directory."); exit(0); }
-   qsort(image_files, stb_arr_len(image_files), sizeof(*image_files), StringCompareSort);
+   if (image_files == nullptr) { error("Error: couldn't read directory."); exit(0); }
+   const size_t array_len = stb_arr_len(image_files);
+   const size_t element_size = sizeof(*image_files);
+   qsort(image_files, array_len, element_size, StringCompareSort);
 
    // given the array of filenames, build an equivalent fileinfo array
-   stb_arr_setlen(fileinfo, stb_arr_len(image_files));
+   stb_arr_setlen(fileinfo, array_len);
 
    // while we're going through, let's look for the current file, and
    // initialize 'cur_loc' to that value. Otherwise it gets a 0.
    cur_loc = 0;
-   for (i=0; i < stb_arr_len(image_files); ++i) {
+   for (i=0; i < stb_arr_len(image_files); ++i)
+   {
       fileinfo[i].filename = image_files[i];
-      fileinfo[i].lru = 0;      
-      if (!stricmp(image_files[i], filename))
+      fileinfo[i].lru = 0;
+      if (!_stricmp(image_files[i], filename))
          cur_loc = i;
    }
 
    // if we made a temp copy of the filename, free it... wait, why,
-   // given that we're not setting filename=NULL?!
+   // given that we're not setting filename=nullptr?!
    // @TODO: why didn't this hurt? if (to_free) free(to_free);
 
    // free the stb_readdir() array, but not the filenames themselves
-   stb_arr_free(image_files); 
+   stb_arr_free(image_files);
 }
 
 // current lru timestamp
@@ -1395,7 +1431,7 @@ int ImageFilePtrCompare(const void *p, const void *q)
 {
    ImageFile *a = *(ImageFile **) p;
    ImageFile *b = *(ImageFile **) q;
-   return (a->lru < b->lru) ? -1 : (a->lru > b->lru);   
+   return (a->lru < b->lru) ? -1 : (a->lru > b->lru);
 }
 
 // see if we should flush any data. we should flush if
@@ -1406,12 +1442,12 @@ void flush_cache(int locked)
 {
    int limit = MAX_CACHED_IMAGES - MIN_CACHE; // maximum images to cache
 
-   volatile ImageFile *list[MAX_CACHED_IMAGES];
+   ImageFile *list[MAX_CACHED_IMAGES];
    int i, total=0, occupied_slots=0, n=0;
 
    // count number of images in use, and size they're using
    for (i=0; i < MAX_CACHED_IMAGES; ++i) {
-      volatile ImageFile *z = &cache[i];
+      ImageFile *z = &cache[i];
       if (z->status != LOAD_unused)
          ++occupied_slots;
       if (MAIN_OWNS(z)) {
@@ -1430,8 +1466,8 @@ void flush_cache(int locked)
    // sort by lru
    qsort((void *) list, n, sizeof(*list), ImageFilePtrCompare);
 
-   // now we free earliest slots on the list... 
-   
+   // now we free earliest slots on the list...
+
    // we could just leave the cache locked the whole time, but will be slightly smarter
    if (!locked) stb_mutex_begin(cache_mutex);
 
@@ -1440,11 +1476,11 @@ void flush_cache(int locked)
          // copy the rest of the data out for later use, then clear the existing data
          ImageFile p = *list[i];
          list[i]->bail = 1; // force disk to bail if it gets this -- can't happen?
-         list[i]->filename = NULL;
-         list[i]->filedata = NULL;
+         list[i]->filename = nullptr;
+         list[i]->filedata = nullptr;
          list[i]->len = 0;
-         list[i]->image = NULL;
-         list[i]->error = NULL;
+         list[i]->image = nullptr;
+         list[i]->error = nullptr;
          list[i]->status = LOAD_unused;
 
          // we're done touching this entry (but not done with the data),
@@ -1453,7 +1489,7 @@ void flush_cache(int locked)
 
          // now do the potentially slow stuff
          o(("MAIN: freeing cache: %s\n", p.filename));
-         stb_sdict_remove(file_cache, p.filename, NULL);
+         stb_sdict_remove(file_cache, p.filename, nullptr);
          --occupied_slots; // occupied slots
          if (p.status == LOAD_available)
             total -= p.image->stride * p.image->y;
@@ -1487,11 +1523,10 @@ int wrap(int z)
 void queue_disk_command(DiskCommand *dc, int which, int make_current)
 {
    char *filename;
-   volatile ImageFile *z;
 
    // check if we already have it cached
    filename = fileinfo[which].filename;
-   z = stb_sdict_get(file_cache, filename);
+   volatile ImageFile *z = (ImageFile *)stb_sdict_get(file_cache, filename);
    if (z) {
       // we already have a cache slot for this entry.
       z->lru = fileinfo[which].lru;
@@ -1520,11 +1555,12 @@ void queue_disk_command(DiskCommand *dc, int which, int make_current)
          }
          return;
       }
-      
+
       // z->status == LOAD_inactive
       // "fall through" to after the if, below
    } else {
-      int i,tried_again=FALSE;
+      int i;
+      bool tried_again = false;
 
       // didn't already have a cache slot, so find one; we called
       // flush_cache() before calling this so a slot should be free
@@ -1539,8 +1575,8 @@ void queue_disk_command(DiskCommand *dc, int which, int make_current)
       // allocate this slot and fill in the info
       z = &cache[i];
       free(z->filename);
-      assert(z->filedata == NULL);
-      z->filename = strdup(filename);
+      assert(z->filedata == nullptr);
+      z->filename = _strdup(filename);
       z->lru = 0;
       z->status = LOAD_inactive;
       stb_sdict_add(file_cache, filename, (void *) z);
@@ -1551,7 +1587,7 @@ void queue_disk_command(DiskCommand *dc, int which, int make_current)
 
    o(("MAIN: proposing %s\n", z->filename));
    z->status = LOAD_inactive;     // we still own it for now
-   z->image = NULL;
+   z->image = nullptr;
    z->bail = 0;
    z->lru = fileinfo[which].lru;  // pass lru value through
 
@@ -1565,7 +1601,7 @@ void advance(int dir)
 {
    DiskCommand dc;
    int i;
-   if (fileinfo == NULL)
+   if (fileinfo == nullptr)
       init_filelist();
 
    cur_loc = wrap(cur_loc + dir);
@@ -1577,7 +1613,7 @@ void advance(int dir)
    fileinfo[cur_loc].lru = ++lru_stamp;
 
    // make sure there's room for new images
-   flush_cache(FALSE);
+   flush_cache(false);
 
    // we're mucking with the cache like mad, so grab the mutex; it doubles
    // as a mutex on dc_shared, so don't release until we're done with dc_shared
@@ -1594,7 +1630,7 @@ void advance(int dir)
       if (dc.num_files) {
          dc_shared = dc;
          for (i=0; i < dc.num_files; ++i)
-            assert(dc.files[i]->filedata == NULL);
+            assert(dc.files[i]->filedata == nullptr);
          // wake up the disk thread if needed
          stb_sem_release(disk_command_queue);
       }
@@ -1607,7 +1643,7 @@ void advance(int dir)
          cache[i].bail = 1;
 
    if (do_show)
-      SetTimer(win, 0, (int)(delay_time*1000), NULL);
+      SetTimer(win, 0, (int)(delay_time*1000), nullptr);
 }
 
 // ctrl-O, or initial command if no filename: run
@@ -1841,7 +1877,7 @@ void mouse(UINT ev, int x, int y)
             case MODE_none:
                break;
 
-            // in drag mode, a mouse move just moves the window 
+            // in drag mode, a mouse move just moves the window
             case MODE_drag: {
                RECT rect;
                GetWindowRect(win, &rect);
@@ -1894,29 +1930,29 @@ static unsigned int physmem; // available physical memory according to GlobalMem
 char *reg_root = "Software\\SilverSpaceship\\imv";
 HKEY zreg;
 
-int reg_get(char *str, void *data, int len)
+int reg_get(char *str, void*data, DWORD len)
 {
-   unsigned int type;
-   if (ERROR_SUCCESS == RegQueryValueEx(zreg, str, 0, &type, data, &len))
+   DWORD type;
+   if (ERROR_SUCCESS == RegQueryValueEx(zreg, str, 0, &type, (BYTE*)data, &len))
       if (type == REG_BINARY)
          return TRUE;
-   return FALSE;
+   return false;
 }
 
-int reg_set(char *str, void *data, int len)
+int reg_set(char *str, void *data, DWORD len)
 {
-   return (ERROR_SUCCESS == RegSetValueEx(zreg, str, 0, REG_BINARY, data, len));
+   return (ERROR_SUCCESS == RegSetValueEx(zreg, str, 0, REG_BINARY, (BYTE*)data, len));
 }
 
 #if USE_STBI
-int only_stbi=FALSE;
+bool only_stbi = false;
 #endif
 
 // we use very short strings for these to avoid wasting space, since
 // people shouldn't be mucking with them directly anyway!
 void reg_save(void)
 {
-   if (ERROR_SUCCESS == RegCreateKeyEx(HKEY_LOCAL_MACHINE, reg_root, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &zreg, NULL))
+   if (ERROR_SUCCESS == RegCreateKeyEx(HKEY_LOCAL_MACHINE, reg_root, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, nullptr, &zreg, nullptr))
    {
       int temp = max_cache_bytes >> 20;
       reg_set("ac", &alpha_background, 6);
@@ -2019,18 +2055,18 @@ void clear_cache(int had_alpha)
    for (i=0; i < MAX_CACHED_IMAGES; ++i) {
       if (cache[i].status == LOAD_available) {
          if (had_alpha ? cache[i].image->had_alpha : TRUE) {
-            stb_sdict_remove(file_cache, cache[i].filename, NULL);
+            stb_sdict_remove(file_cache, cache[i].filename, nullptr);
             free(cache[i].filename);
             imfree(cache[i].image);
             cache[i].status = LOAD_unused;
-            cache[i].image = NULL;
-            cache[i].filename = NULL;
+            cache[i].image = nullptr;
+            cache[i].filename = nullptr;
          }
       }
    }
    stb_mutex_end(cache_mutex);
    free(cur_filename);
-   cur_filename = NULL;
+   cur_filename = nullptr;
 }
 
 // preferences dialog windows procedure
@@ -2050,7 +2086,7 @@ BOOL CALLBACK PrefDlgProc(HWND hdlg, UINT imsg, WPARAM wparam, LPARAM lparam)
          // decode it
 #if USE_STBI
          int i, j, k;
-         uint8 *data = stbi_load_from_memory(rom_images[n],2000,&x,&y,NULL,1);
+         uint8_t *data = stbi_load_from_memory(rom_images[n],2000,&x,&y,nullptr,1);
          pref_image = bmp_alloc(x,y);
          if (data && pref_image) {
             // convert monochrome to BGR
@@ -2062,8 +2098,8 @@ BOOL CALLBACK PrefDlgProc(HWND hdlg, UINT imsg, WPARAM wparam, LPARAM lparam)
          if (data) free(data);
 #else
          int channels;
-         Bool loaded_as_rgb;
-         uint8 *data = imv_decode_from_memory(rom_images[n], 2000, &x, &y, &loaded_as_rgb, &channels, BPP, "");
+         bool loaded_as_rgb;
+         uint8_t *data = imv_decode_from_memory(rom_images[n], 2000, &x, &y, &loaded_as_rgb, &channels, BPP, "");
          assert(channels == BPP);
          pref_image = bmp_alloc(x, y);
          pref_image->pixels = data;
@@ -2074,7 +2110,7 @@ BOOL CALLBACK PrefDlgProc(HWND hdlg, UINT imsg, WPARAM wparam, LPARAM lparam)
 #if USE_STBI
          SendMessage(GetDlgItem(hdlg, DIALOG_stbi_only), BM_SETCHECK, only_stbi, 0);
 #else
-         EnableWindow(GetDlgItem(hdlg, DIALOG_stbi_only), FALSE);
+         EnableWindow(GetDlgItem(hdlg, DIALOG_stbi_only), false);
 #endif
          SendMessage(GetDlgItem(hdlg, DIALOG_showborder), BM_SETCHECK, show_frame, 0);
          for (i=0; i < 6; ++i)
@@ -2093,7 +2129,7 @@ BOOL CALLBACK PrefDlgProc(HWND hdlg, UINT imsg, WPARAM wparam, LPARAM lparam)
             GetWindowRect(pic,&z);
             // not clear why these next two lines work/are required, but it's what petzold does;
             // doesn't UpdateWindow() just force a WM_PAINT? why isn't this an infinite loop?
-            InvalidateRect(pic,NULL,TRUE);
+            InvalidateRect(pic,nullptr,TRUE);
             UpdateWindow(pic);
             // center it
             x = (z.right - z.left - pref_image->x) >> 1;
@@ -2142,14 +2178,14 @@ BOOL CALLBACK PrefDlgProc(HWND hdlg, UINT imsg, WPARAM wparam, LPARAM lparam)
 #endif //USE_STBI
                new_border     = BST_CHECKED == SendMessage(GetDlgItem(hdlg,DIALOG_showborder),BM_GETCHECK,0,0);
 
-               // if alpha_background changed, clear the cache of any images that used it                
+               // if alpha_background changed, clear the cache of any images that used it
                if (memcmp(alpha_background, curc, 6)) {
                   clear_cache(1);
                   // force a reload of the current image
                   advance(0);
                } else if (old_cubic != upsample_cubic) {
                   free(cur_filename);
-                  cur_filename = NULL;
+                  cur_filename = nullptr;
                   advance(0);
                }
 
@@ -2167,7 +2203,7 @@ BOOL CALLBACK PrefDlgProc(HWND hdlg, UINT imsg, WPARAM wparam, LPARAM lparam)
                build_label_font();
 
                // redraw window -- only needed if changed label state, but we can live with always
-               InvalidateRect(win, NULL, FALSE);
+               InvalidateRect(win, nullptr, FALSE);
 
                /* FALL THROUGH */
             }
@@ -2192,14 +2228,14 @@ void performance_test(void)
 {
    int t1,t2;
    int len,i;
-   uint8 *buffer = stb_file(cur_filename, &len);
-   if (buffer == NULL) return;
-   
+   uint8_t *buffer = stb_file(cur_filename, &len);
+   if (buffer == nullptr) return;
+
    t1 = timeGetTime();
 
    for (i=0; i < 50; ++i) {
       int x,y,n;
-      uint8 *result = imv_decode_from_memory(buffer, len, &x, &y, &n, 4, cur_filename);
+      uint8_t *result = imv_decode_from_memory(buffer, len, &x, &y, &n, 4, cur_filename);
       free(result);
    }
 
@@ -2263,7 +2299,7 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
          // and store that in 'best'.
          int i;
          // int best_lru=0;
-         volatile ImageFile *best = NULL;
+         volatile ImageFile *best = nullptr;
          for (i=0; i < MAX_CACHED_IMAGES; ++i) {
             if (cache[i].lru > best_lru) {
                if (MAIN_OWNS(&cache[i])) {
@@ -2287,12 +2323,12 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
          // so we won't ever retreat. I'm not sure how this really interacts with
          // the above loop, though. maybe they should be combined.
          int i;
-         ImageFile *best = NULL;
+         ImageFile *best = nullptr;
          for (i=0; i < stb_arr_len(fileinfo); ++i) {
             if (fileinfo[i].lru > best_lru) {
-               ImageFile *z = stb_sdict_get(file_cache, fileinfo[i].filename);
+               ImageFile *z = (ImageFile *)stb_sdict_get(file_cache, fileinfo[i].filename);
                if (z && z->status == LOAD_available) {
-                  assert(z->image != NULL);
+                  assert(z->image != nullptr);
                   best = z;
                   best_lru = fileinfo[i].lru;
                }
@@ -2315,7 +2351,7 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
          if (zdelta < 0) resize(-1);
          break;
       }
-         
+
       case WM_MOUSEMOVE:
       case WM_LBUTTONDOWN:
       case WM_RBUTTONDOWN:
@@ -2380,7 +2416,7 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                if (!show_help)
                   exit(0);
                show_help = !show_help;
-               InvalidateRect(win, NULL, FALSE);
+               InvalidateRect(win, nullptr, FALSE);
                break;
 
             case ' ': // space
@@ -2393,13 +2429,13 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
             case 'l': case 'L':
                show_label = !show_label;
-               InvalidateRect(win, NULL, FALSE);
+               InvalidateRect(win, nullptr, FALSE);
                break;
 
             case 's': case 'S':
                do_show = !do_show;
                if (do_show)
-                  SetTimer(win,0,(int)(1000*delay_time),NULL);
+                  SetTimer(win,0,(int)(1000*delay_time),nullptr);
                else
                   KillTimer(win,0);
                break;
@@ -2452,7 +2488,7 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             case VK_SLASH:
             case VK_SLASH | MY_SHIFT:
                show_help = !show_help;
-               InvalidateRect(win, NULL, FALSE);
+               InvalidateRect(win, nullptr, FALSE);
                break;
 
 #ifdef MONO_THUMB
@@ -2472,7 +2508,7 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             case 'B' | MY_CTRL:
                extra_border = !extra_border;
                if (cur) frame(cur);
-               InvalidateRect(win, NULL, FALSE);
+               InvalidateRect(win, nullptr, FALSE);
                break;
 
             case 'B' | MY_SHIFT:
@@ -2501,7 +2537,7 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                char buffer[1024], *t;
                stb_fullpath(buffer, 1024, source_c->filename);
                hMem = GlobalAlloc(GHND, strlen(buffer)+1);
-               t = GlobalLock(hMem);
+               t = (char*)GlobalLock(hMem);
                strcpy(t, buffer);
                GlobalUnlock(hMem);
                OpenClipboard(win);
@@ -2520,7 +2556,8 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             case 'R' | MY_ALT: {
                static int init;
                int n;
-               char buffer[512], **subdir;
+               char buffer[512];
+               STB__ARR(char*) subdir;
                recursive = TRUE;
                strcpy(buffer, path_to_file);
                if (buffer[strlen(buffer)-1] == '/')
@@ -2529,7 +2566,7 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                subdir = stb_readdir_subdirs(path_to_file);
                if (!init) {
                   init = 1;
-                  stb_srand(time(NULL));
+                  stb_srand(time(nullptr));
                }
                n = stb_rand() % stb_arr_len(subdir);
                strcpy(path_to_file, subdir[n]);
@@ -2546,17 +2583,17 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                   PROCESS_INFORMATION pi={0};
                   STARTUPINFO si={0};
                   buffer[0] = '"';
-                  GetModuleFileName(NULL, buffer+1, MAX_PATH);
+                  GetModuleFileName(nullptr, buffer+1, MAX_PATH);
                   strcat(buffer, "\" \"");
                   stb_fullpath(buffer+strlen(buffer), 1020, source_c->filename);
                   strcat(filename, "\"");
-                  CreateProcess(NULL, buffer, NULL, NULL, FALSE, DETACHED_PROCESS, NULL, NULL, &si, &pi);
+                  CreateProcess(nullptr, buffer, nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, nullptr, &si, &pi);
                #else
                   char buffer[MAX_PATH],filename[1024] = {'\"'};
-                  GetModuleFileName(NULL, buffer, sizeof(buffer));
+                  GetModuleFileName(nullptr, buffer, sizeof(buffer));
                   stb_fullpath(filename+1, sizeof(filename)-2, source_c->filename);
                   strcat(filename, "\"");
-                  _spawnl(_P_NOWAIT, buffer, buffer, filename, NULL);
+                  _spawnl(_P_NOWAIT, buffer, buffer, filename, nullptr);
                #endif
                break;
             }
@@ -2615,7 +2652,7 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
       default:
          return DefWindowProc (hWnd, uMsg, wParam, lParam);
    }
-  
+
    return 1;
 }
 
@@ -2633,9 +2670,9 @@ int cur_is_current(void)
 #if USE_GDIPLUS
 typedef ULONG ULONG_PTR;
 
-static Bool GdiplusPresent;
+static bool GdiplusPresent;
 static ULONG_PTR GpToken;
-static Bool LoadGdiplus(void);
+static bool LoadGdiplus(void);
 #define ICM_SUFFIX ""
 // use this definition to enable color management
 //#define ICM_SUFFIX "ICM"
@@ -2662,7 +2699,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 
    // initial loaded image
-   int image_x, image_y, image_loaded_as_rgb, image_n;
+   int image_x, image_y, image_n;
+   bool image_loaded_as_rgb = false;
    unsigned char *image_data;
 
    inst = hInstance;
@@ -2714,8 +2752,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
    wndclass.lpfnWndProc   = (WNDPROC)MainWndProc;
    wndclass.hInstance     = hInstance;
    wndclass.hIcon         = LoadIcon(hInstance, szAppName);
-   wndclass.hCursor       = LoadCursor(NULL,IDC_ARROW);
-   wndclass.hbrBackground = NULL;
+   wndclass.hCursor       = LoadCursor(nullptr,IDC_ARROW);
+   wndclass.hbrBackground = nullptr;
    wndclass.lpszMenuName  = szAppName;
    wndclass.lpszClassName = szAppName;
    wndclass.hIconSm       = LoadIcon(hInstance, szAppName);
@@ -2723,15 +2761,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
       return FALSE;
 
    // cache the cursors
-   c_def   = LoadCursor(NULL, IDC_ARROW);
-   c_nw_se = LoadCursor(NULL, IDC_SIZENWSE);
-   c_ne_sw = LoadCursor(NULL, IDC_SIZENESW);
-   c_e_w   = LoadCursor(NULL, IDC_SIZEWE);
-   c_n_s   = LoadCursor(NULL, IDC_SIZENS);
+   c_def   = LoadCursor(nullptr, IDC_ARROW);
+   c_nw_se = LoadCursor(nullptr, IDC_SIZENWSE);
+   c_ne_sw = LoadCursor(nullptr, IDC_SIZENESW);
+   c_e_w   = LoadCursor(nullptr, IDC_SIZEWE);
+   c_n_s   = LoadCursor(nullptr, IDC_SIZENS);
 
    build_label_font();
 
-   srand(time(NULL));
+   srand(time(nullptr));
 
    if (argc < 2) {
       stb__wchar buf1[1024], buf2[4096];
@@ -2765,20 +2803,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
          filename = filenamebuffer;
       }
    }
-   
+
    // allocate worker threads
    resize_workers = stb_workq_new(resize_threads, resize_threads * 4);
 
    // load initial image
    {
-      char *why=NULL;
-      int len;
-      uint8 *data = stb_file(filename, &len);
+      Timer timer;
+      char *why=nullptr;
+      size_t len = 0;
+      uint8_t *data = (uint8_t*)stb_file(filename, &len);
       if (!data)
          why = "Couldn't open file";
       else {
          image_data = imv_decode_from_memory(data, len, &image_x, &image_y, &image_loaded_as_rgb, &image_n, BPP, filename);
-         if (image_data == NULL)
+         if (image_data == nullptr)
             why = imv_failure_reason();
       }
 
@@ -2791,6 +2830,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
          error(buffer);
          exit(0);
       }
+      printf("Elapse time %g\n", timer.elapsed_ms());
    }
 
    // fix the filename & path for consistency with readdir()
@@ -2806,19 +2846,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
    resize_merge = stb_sync_new();
 
    // go ahead and start the other tasks
-   stb_create_thread(diskload_task, NULL);
-   stb_create_thread(decode_task, NULL);
+   stb_create_thread(diskload_task, nullptr);
+   stb_create_thread(decode_task, nullptr);
 
    // create the source image by converting the image data to BGR,
    // pre-blending alpha
-   source = malloc(sizeof(*source));
+   source = (Image *)malloc(sizeof(*source));
    make_image(source, image_x, image_y, image_data, image_loaded_as_rgb, image_n);
 
    // create a cache entry in case they start browsing later
    cache[0].status = LOAD_available;
    cache[0].image = source;
    cache[0].lru = lru_stamp++;
-   cache[0].filename = strdup(filename);
+   cache[0].filename = _strdup(filename);
    file_cache = stb_sdict_new(1);
    stb_sdict_add(file_cache, filename, (void *) &cache[0]);
    source_c = (ImageFile *) &cache[0];
@@ -2837,7 +2877,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                         WS_OVERLAPPEDWINDOW,
                         CW_USEDEFAULT,CW_USEDEFAULT,1,1,
                         //x,y, w, h,
-                        NULL, NULL, hInstance, NULL);
+                        nullptr, nullptr, hInstance, nullptr);
 
       if (!hWnd)
          return FALSE;
@@ -2855,7 +2895,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
       //cx = GetSystemMetrics(SM_CXSCREEN);
       //cy = GetSystemMetrics(SM_CYSCREEN);
 
-      // determine an initial window size, and resize 
+      // determine an initial window size, and resize
       ideal_window_size(w2,h2, &w,&h, &x,&y, cx,cy);
 
       // if the size exactly matches, don't resize, just copy
@@ -2878,9 +2918,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
          queue_resize(w,h, (ImageFile *) &cache[0], TRUE);
          display_error[0] = 0;
          cur = pending_resize.image;
-         pending_resize.image = NULL;
+         pending_resize.image = nullptr;
       }
-      cur_filename = strdup(filename);
+      cur_filename = _strdup(filename);
       if (!show_frame) {
          x += FRAME;
          y += FRAME;
@@ -2896,13 +2936,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
       hWnd = CreateWindow(szAppName, displayName,
                         WS_POPUP,
                         x,y, w, h,
-                        NULL, NULL, hInstance, NULL);
+                        nullptr, nullptr, hInstance, nullptr);
    } // open brace for defining some temporary variables
 
    // display the window
    ShowWindow(hWnd, nCmdShow);
    UpdateWindow(hWnd);
-   InvalidateRect(hWnd, NULL, TRUE);
+   InvalidateRect(hWnd, nullptr, TRUE);
 
    for(;;) {
       // if we're not currently resizing, and there's a resize request
@@ -2913,7 +2953,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                // no resize necessary, just a variant of the current shape
                if (!show_frame) qs.x += FRAME, qs.y += FRAME, qs.w -= 2*FRAME, qs.h -= 2*FRAME;
                MoveWindow(win, qs.x,qs.y,qs.w,qs.h, TRUE);
-               InvalidateRect(win, NULL, FALSE);
+               InvalidateRect(win, nullptr, FALSE);
             } else {
                o(("Enqueueing resize\n"));
                pending_resize.size = qs;
@@ -2928,7 +2968,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
       // post us a message to wake us up, but I wrote this before I had
       // that infrastructure worked out
 
-      if (!PeekMessage(&msg, NULL, 0,0, PM_NOREMOVE)) {
+      if (!PeekMessage(&msg, nullptr, 0,0, PM_NOREMOVE)) {
          // no messages, so check for a resize completing
          if (pending_resize.size.w) {
             // there's a resize pending, so don't block
@@ -2948,9 +2988,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                // free the current image we're about to write over
                imfree(cur);
                cur = pending_resize.image;
-               // pending_resize.filename was strdup()ed, so just take ownership of it
+               // pending_resize.filename was _strdup()ed, so just take ownership of it
                cur_filename = pending_resize.filename;
-               pending_resize.filename = NULL;
+               pending_resize.filename = nullptr;
 
                // clear error messages
                display_error[0] = 0;
@@ -2963,14 +3003,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                }
 
                // resize the window
-               SetWindowPos(hWnd,NULL,pending_resize.size.x, pending_resize.size.y, pending_resize.size.w, pending_resize.size.h, SWP_NOZORDER|SWP_NOCOPYBITS);
+               SetWindowPos(hWnd,nullptr,pending_resize.size.x, pending_resize.size.y, pending_resize.size.w, pending_resize.size.h, SWP_NOZORDER|SWP_NOCOPYBITS);
                //MoveWindow(hWnd,pending_resize.size.x, pending_resize.size.y, pending_resize.size.w, pending_resize.size.h, FALSE);
 
                // clear the resize request info
                barrier();
                pending_resize.size.w = 0;
 
-               // paint the window              
+               // paint the window
                hdc = GetDC(win);
                display(hWnd, hdc);
                ReleaseDC(win, hdc);
@@ -2982,7 +3022,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
       }
 
       // we can get rid of this with peek-with-remove, surely?
-      if (!GetMessage(&msg, NULL, 0, 0))
+      if (!GetMessage(&msg, nullptr, 0, 0))
          return msg.wParam;
 
       TranslateMessage(&msg);
@@ -3099,13 +3139,14 @@ void *image_resize_work(ImageProcess *q)
          y += q->dy;
       }
    }
-   return NULL;
+   return nullptr;
 }
 
 void image_resize_bilinear(Image *dest, Image *src)
 {
-   ImageProcess proc_buffer[16], *q = stb_temp(proc_buffer, resize_threads * sizeof(*q));
-   SplitPoint *p = stb_temp(point_buffer, dest->x * sizeof(*p));
+   ImageProcess proc_buffer[16];
+   ImageProcess *q = (ImageProcess *)stb_temp(proc_buffer, resize_threads * sizeof(*q));
+   SplitPoint *p = (SplitPoint *)stb_temp(point_buffer, dest->x * sizeof(*p));
    int i,j0,j1,k;
    float x,dx,dy;
    assert(src->frame == 0);
@@ -3140,12 +3181,15 @@ void image_resize_bilinear(Image *dest, Image *src)
       j1 = j0;
    }
 
-   if (resize_threads == 1) {
+   if (resize_threads == 1)
+   {
       image_resize_work(q);
    } else {
       stb_sync_set_target(resize_merge, resize_threads);
       for (i=1; i < resize_threads; ++i)
-         stb_workq_reach(resize_workers, image_resize_work, q+i, NULL, resize_merge);
+      {
+         stb_workq_reach(resize_workers, (stb_thread_func)image_resize_work, q+i, nullptr, resize_merge);
+      }
       image_resize_work(q);
       stb_sync_reach_and_wait(resize_merge);
    }
@@ -3176,7 +3220,7 @@ typedef uint32 Color;
 // lerp() is just blend() that also "blends" alpha
 // put a/256 of src over dest, including alpha
 ;// again, cannot be used for a=256
-static Color lerp(Color dest, Color src, uint8 a)
+static Color lerp(Color dest, Color src, uint8_t a)
 {
    int rb_src  = src  & 0xff00ff;
    int rb_dest = dest & 0xff00ff;
@@ -3197,7 +3241,6 @@ static Color lerp(Color dest, Color src, uint8 a)
 //   out = (a*t+b)*t^2 + (c*t+d)*1
 
 MMX int16 three[4] = { 3,3,3,3 };
-MMX int16 round[4] = { 128,128,128,128 };
 
 static void cubic_interpolate_span(uint32 *dest,
                                    uint32 *x0, uint32 *x1, uint32 *x2, uint32 *x3,
@@ -3348,7 +3391,7 @@ static void cubic_interpolate_span(Color *dest, Color *x0, Color *x1, Color *x2,
 }
 #endif
 
-#define PLUS(x,y)   ((uint32 *) ((uint8 *) (x) + (y)))
+#define PLUS(x,y)   ((uint32 *) ((uint8_t *) (x) + (y)))
 
 struct
 {
@@ -3394,7 +3437,7 @@ void * cubic_interp_1d_x_work(int n)
          x += dx;
       }
    }
-   return NULL;
+   return nullptr;
 }
 
 Image *cubic_interp_1d_x(Image *src, int out_w)
@@ -3411,7 +3454,7 @@ Image *cubic_interp_1d_x(Image *src, int out_w)
    } else {
       stb_sync_set_target(resize_merge, resize_threads);
       for (i=1; i < resize_threads; ++i)
-         stb_workq_reach(resize_workers, (stb_thread_func) cubic_interp_1d_x_work, (void *) i, NULL, resize_merge);
+         stb_workq_reach(resize_workers, (stb_thread_func) cubic_interp_1d_x_work, (void *) i, nullptr, resize_merge);
       cubic_interp_1d_x_work(0);
       stb_sync_reach_and_wait(resize_merge);
    }
@@ -3432,14 +3475,14 @@ Image *cubic_interp_1d_y_work(int n)
    for (; j < j_end; ++j,y+=dy) {
       uint32 *dest  = (uint32 *) (out->pixels + j*out->stride);
       int yp = (y >> 16);
-      uint8 yw = (y >> 8);
+      uint8_t yw = (y >> 8);
       uint32 *data1 = (uint32 *) (src->pixels + yp*src->stride);
       uint32 *data2 = PLUS(data1,src->stride);
       uint32 *data0 = (yp > 0) ? PLUS(data1, - src->stride) : data1;
       uint32 *data3 = (yp < src->y-2) ? PLUS(data2, src->stride) : data2;
       cubic_interpolate_span(dest, data0, data1, data2, data3, yw, 4,4,out->x);
    }
-   return NULL;
+   return nullptr;
 }
 
 Image *cubic_interp_1d_y(Image *src, int out_h)
@@ -3456,7 +3499,7 @@ Image *cubic_interp_1d_y(Image *src, int out_h)
       barrier();
       stb_sync_set_target(resize_merge, resize_threads);
       for (i=1; i < resize_threads; ++i)
-         stb_workq_reach(resize_workers, (stb_thread_func) cubic_interp_1d_y_work, (void *) i, NULL, resize_merge);
+         stb_workq_reach(resize_workers, (stb_thread_func) cubic_interp_1d_y_work, (void *) i, nullptr, resize_merge);
       cubic_interp_1d_y_work(0);
       stb_sync_reach_and_wait(resize_merge);
    }
@@ -3507,7 +3550,7 @@ Image *downsample_two_thirds(Image *src)
       Color *src2 = PLUS(src1, src->stride);
       // use (2/3,1/3) and (1/3,2/3), which amounts to:
       //    A B C     W  X
-      //    D E F  -> 
+      //    D E F  ->
       //    G H I     Y  Z
 
       // W = A*4/9 + B * 2/9 + D * 2/9 + E * 1/9
@@ -3529,21 +3572,21 @@ Image *downsample_two_thirds(Image *src)
                  + ((src1[1] >> 3) & 0x1f1f1f1f);
          src0 += 3;
          src1 += 3;
-         src2 += 3;         
+         src2 += 3;
       }
    }
 
    return res;
 }
 
-void do_sharpen(uint8 *data, int stride, int x, int y)
+void do_sharpen(uint8_t *data, int stride, int x, int y)
 {
    int i,j,k;
-   uint8 prev[3200*4];
+   uint8_t prev[3200*4];
    if (x > 3200) return;
    memcpy(prev, data, x*BPP);
    for (j=1; j < y-1; ++j) {
-      uint8 *next = data + stride*(j+1);
+      uint8_t *next = data + stride*(j+1);
       unsigned char left[4];
       memcpy(left, data+stride*j+BPP, BPP);
       for (i=1; i < x-1; ++i) {
@@ -3570,7 +3613,7 @@ Image *grScaleBitmap(Image *src, int gx, int gy, Image *dest)
 {
    Image *to_free, *res;
    int upsample=FALSE;
-   to_free = NULL;
+   to_free = nullptr;
 
    // check if we're scaling up
    if (gx > src->x || gy > src->y)  {
@@ -3714,7 +3757,7 @@ static GdiplusStartupOutput gpStartupOutput;
 // from GdiplusHeaders.h
 typedef void GpImage; // opaque type
 
-typedef struct { 
+typedef struct {
    GpImage* nativeImage;
    GpStatus lastResult;
    GpStatus loadStatus;
@@ -3737,7 +3780,7 @@ typedef INT GpPixelFormat;
 // bits 24-31 = reserved
 #define GpPixelFormatGDI       0x00020000 // Is a GDI-supported format
 #define GpPixelFormatAlpha     0x00040000 // Has an alpha component
-#define GpPixelFormatCanonical 0x00200000 
+#define GpPixelFormatCanonical 0x00200000
 #define GpPixelFormat24bppRGB  (8  | (24 << 8) | GpPixelFormatGDI)
 #define GpPixelFormat32bppARGB (10 | (32 << 8) | GpPixelFormatAlpha | GpPixelFormatGDI | GpPixelFormatCanonical)
 
@@ -3781,38 +3824,39 @@ static GdipBitmapUnlockBitsProc GdipBitmapUnlockBits;
 FARPROC GpFunc(char *str)
 {
    FARPROC p = GetProcAddress(GdiplusDLL, str);
-   if (p == NULL)
+   if (p == nullptr)
       GdiplusPresent = FALSE; // if something doesn't load, bail!
    return p;
 }
 
-static Bool LoadGdiplus(void)
+static bool LoadGdiplus(void)
 {
-   static Bool InitializationAttempted = FALSE;
+   static bool InitializationAttempted = FALSE;
    if (InitializationAttempted)
       return GdiplusPresent;
 
-   InitializationAttempted = TRUE;
+   InitializationAttempted = true;
    GdiplusPresent = FALSE;
    GdiplusDLL = LoadLibrary("gdiplus.dll");
    if (!GdiplusDLL)
       return GdiplusPresent;
 
-   GdiplusPresent = TRUE;
+   GdiplusPresent = true;
    GdiplusStartup = (GdiplusStartupProc)GpFunc("GdiplusStartup");
    //GdiplusShutdown = (GdiplusShutdownProc)GpFunc("GdiplusShutdown");
    GdipCreateBitmapFromStream = (GdipCreateBitmapFromStreamProc)GpFunc("GdipCreateBitmapFromStream" ICM_SUFFIX);
    GdipDisposeImage = (GdipDisposeImageProc)GpFunc("GdipDisposeImage");
    GdipBitmapLockBits = (GdipBitmapLockBitsProc)GpFunc("GdipBitmapLockBits");
    GdipBitmapUnlockBits = (GdipBitmapUnlockBitsProc)GpFunc("GdipBitmapUnlockBits");
-   if (!GdiplusPresent) {
+   if (!GdiplusPresent)
+   {
 #if USE_STBI
       if (!only_stbi)
 #endif
          error("Invalid GdiPlus.dll; disabling GDI+ support.");
    } else {
       // no need to use GDI+ backup thread, or to call the hook methods in gpStartupOutput
-      GdiplusStartupInput gpStartupInput = { 1, NULL, TRUE, FALSE };
+      GdiplusStartupInput gpStartupInput = { 1, nullptr, true, FALSE };
       if (GdiplusStartup(&GpToken, &gpStartupInput, &gpStartupOutput) != GpOk) {
          GdiplusPresent = FALSE;
 #if USE_STBI
@@ -3825,31 +3869,36 @@ static Bool LoadGdiplus(void)
    return GdiplusPresent;
 }
 
-static uint8 *LoadImageWithGdiplus(uint8 *mem, int len, int *x, int *y, int *n, int n_req) {
-   HGLOBAL hMem = NULL;
-   IStream* stream = NULL;
-   GpBitmap* bitmap = NULL;
+static uint8_t *LoadImageWithGdiplus(uint8_t *mem, int len, int *x, int *y, int *n, int n_req) {
+   HGLOBAL hMem = nullptr;
+   GpBitmap* bitmap = nullptr;
    GpBitmapData data;
    GpPixelFormat pixelFormat;
    size_t i, image_sz = 0;
-   uint8 *buf = NULL, *ret = NULL;
+   uint8_t *buf = nullptr, *ret = nullptr;
    image_sz = 0;
    *x = 0;
    *y = 0;
    *n = n_req;
-   data.Scan0 = NULL;
+   data.Scan0 = nullptr;
 
    hMem = GlobalAlloc(GMEM_MOVEABLE, len);
    if (!hMem)
+   {
       goto liwgExit;
+   }
 
-   buf = GlobalLock(hMem);
-   if (!buf) goto liwgExit;
+   buf = (uint8_t*)GlobalLock(hMem);
+   if (!buf)
+   {
+      goto liwgExit;
+   }
 
    memcpy(buf, mem, len);
    if (GlobalUnlock(hMem))
       goto liwgExit;
 
+   IStream* stream = nullptr;
    if (CreateStreamOnHGlobal(buf, FALSE, &stream) != S_OK)
       goto liwgExit;
 
@@ -3864,21 +3913,21 @@ static uint8 *LoadImageWithGdiplus(uint8 *mem, int len, int *x, int *y, int *n, 
    pixelFormat = GpPixelFormat32bppARGB;
 #endif
 
-   if (GdipBitmapLockBits(bitmap, NULL, GpImageLockModeRead, pixelFormat, &data) != GpOk)
+   if (GdipBitmapLockBits(bitmap, nullptr, GpImageLockModeRead, pixelFormat, &data) != GpOk)
       goto liwgExit;
 
    *x = data.Width;
    *y = data.Height;
    *n = n_req;
    image_sz = data.Width * data.Height * n_req;
-   ret = (uint8*)malloc(image_sz);
+   ret = (uint8_t*)malloc(image_sz);
    for (i=0; i<data.Height; ++i)
-      memcpy(&ret[i*data.Width*n_req], &((uint8*)data.Scan0)[i*data.Stride], data.Width*n_req);
-    
+      memcpy(&ret[i*data.Width*n_req], &((uint8_t*)data.Scan0)[i*data.Stride], data.Width*n_req);
+
 liwgExit:
    if (data.Scan0) GdipBitmapUnlockBits(bitmap, &data);
    if (bitmap)     GdipDisposeImage(bitmap);
-   if (stream)     stream->lpVtbl->Release(stream);
+   if (stream)     stream->Release();
    if (hMem)       GlobalFree(hMem);
 
    return ret;
@@ -3903,7 +3952,7 @@ typedef void (*FreeImage_OutputMessageFunction)(FREE_IMAGE_FORMAT fif, const cha
 fitype(void) freeimage_setoutputmessage(FreeImage_OutputMessageFunction omf);
 static freeimage_setoutputmessage *FreeImage_SetOutputMessage;
 
-fitype(FIMEMORY *) freeimage_openmemory(uint8 *data, unsigned size);
+fitype(FIMEMORY *) freeimage_openmemory(uint8_t *data, unsigned size);
 static freeimage_openmemory *FreeImage_OpenMemory;
 
 fitype(void) freeimage_closememory(FIMEMORY *stream);
@@ -3951,7 +4000,7 @@ static HINSTANCE FreeImageDLL;
 FARPROC fifunc(char *str)
 {
    FARPROC p = GetProcAddress(FreeImageDLL, str);
-   if (p == NULL)
+   if (p == nullptr)
       FreeImagePresent = FALSE; // if something doesn't load, bail!
    return p;
 }
@@ -3961,12 +4010,12 @@ static int LoadFreeImage(void)
    static int InitializationAttempted;
    if (InitializationAttempted) return FreeImagePresent;
 
-   InitializationAttempted = TRUE;
+   InitializationAttempted = true;
    FreeImagePresent = FALSE;
    FreeImageDLL = LoadLibrary("FreeImage.dll");
    if (!FreeImageDLL) return FreeImagePresent;
 
-   FreeImagePresent = TRUE;
+   FreeImagePresent = true;
    FreeImage_ConvertToRawBits = (freeimage_converttorawbits *)fifunc("_FreeImage_ConvertToRawBits@32");
    FreeImage_GetBits = (freeimage_getbits *)fifunc("_FreeImage_GetBits@4");
    FreeImage_GetFIFFromFilename = (freeimage_getfiffromfilename *)fifunc("_FreeImage_GetFIFFromFilename@4");
@@ -3992,15 +4041,15 @@ static int LoadFreeImage(void)
    return FreeImagePresent;
 }
 
-uint8 *LoadImageWithFreeImage(FIMEMORY *fi, int *x, int *y, int *n, int n_req)
+uint8_t *LoadImageWithFreeImage(FIMEMORY *fi, int *x, int *y, int *n, int n_req)
 {
-   uint8 *Result = 0;
+   uint8_t *Result = 0;
    FREE_IMAGE_FORMAT FileFormat = FreeImage_GetFileTypeFromMemory(fi, 0);
    FIBITMAP *Bitmap;
    if(FileFormat == -1) {
       // @TODO: propogate the filename to here?
       // bail!
-      return NULL;
+      return nullptr;
       // FileFormat = FreeImage_GetFIFFromFilename(FromFilename);
    }
 
@@ -4011,7 +4060,7 @@ uint8 *LoadImageWithFreeImage(FIMEMORY *fi, int *x, int *y, int *n, int n_req)
       int32 Width = FreeImage_GetWidth(Bitmap);
       int32 Height = FreeImage_GetHeight(Bitmap);
 
-      Result = (uint8 *) malloc(Width * Height * BPP);
+      Result = (uint8_t *) malloc(Width * Height * BPP);
       if(Result) {
          FreeImage_ConvertToRawBits(Result, Bitmap, BPP*Width, BPP*8, 0xff0000,0x00ff00,0xff, FALSE);
          *x = Width;
@@ -4021,13 +4070,13 @@ uint8 *LoadImageWithFreeImage(FIMEMORY *fi, int *x, int *y, int *n, int n_req)
       FreeImage_Unload(Bitmap);
    }
    return Result;
-} 
+}
 #endif
 
-static uint8 *imv_decode_from_memory(uint8 *mem, int len, int *x, int *y, Bool* loaded_as_rgb, int *n, int n_req, char *filename)
+static uint8_t *imv_decode_from_memory(uint8_t *mem, int len, int *x, int *y, bool* loaded_as_rgb, int *n, int n_req, char *filename)
 {
-   uint8 *res = NULL;
-   imv_failure_string = NULL;
+   uint8_t *res = nullptr;
+   imv_failure_string = nullptr;
 
    // prefer STBI over everything else
 
@@ -4035,7 +4084,7 @@ static uint8 *imv_decode_from_memory(uint8 *mem, int len, int *x, int *y, Bool* 
 #if USE_STBI
    res = stbi_load_from_memory(mem, len, x, y, n, n_req);
    if (res) {
-       *loaded_as_rgb = TRUE;
+       *loaded_as_rgb = true;
        return res;
    }
    imv_failure_string = stbi_failure_reason();
@@ -4043,18 +4092,19 @@ static uint8 *imv_decode_from_memory(uint8 *mem, int len, int *x, int *y, Bool* 
    if ((mem[0] == 's' || mem[0] == 'x') && memcmp(mem+1, "PIC-delta-image", 16) == 0) {
       char full_filename[1024];
       int len2;
-      uint8 *mem2;
+      uint8_t *mem2;
       FILE *f;
       stb_splitpath(full_filename, filename, STB_PATH);
-      strcat(full_filename, mem+17+4);
+      strcat(full_filename, (char*)(mem+17+4));
       f = fopen(full_filename, "rb");
-      if (f && (len2 = stb_filelen(f), mem2 = malloc(len2)) != NULL) {
+      if (f && (len2 = stb_filelen(f), mem2 = (uint8_t*)malloc(len2)) != nullptr)
+      {
          fread(mem2, 1, len2, f);
-         fclose(f); f = NULL;
+         fclose(f); f = nullptr;
          res = stbi_load_from_memory(mem2, len2, x, y, n, n_req);
          if (res) {
             int i,offset,c;
-            *loaded_as_rgb = TRUE;
+            *loaded_as_rgb = true;
             offset = 17;
             offset += 4 + *(int *) (mem+offset);
             if (  *x != *(int *) (mem+offset  )
@@ -4062,7 +4112,7 @@ static uint8 *imv_decode_from_memory(uint8 *mem, int len, int *x, int *y, Bool* 
             {
                free(res);
                free(mem2);
-               return NULL;
+               return nullptr;
             }
             offset += 8; // skip x,y
             c = *(int *) (mem+offset);

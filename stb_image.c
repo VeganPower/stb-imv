@@ -2431,7 +2431,6 @@ static int create_png_image_raw(png *a, uint8 *raw, uint32 raw_len, int out_n, u
 
 static int create_png_image(png *a, uint8 *raw, uint32 raw_len, int out_n, int interlaced)
 {
-   uint8 *final;
    int p;
    int save;
    if (!interlaced)
@@ -2440,7 +2439,7 @@ static int create_png_image(png *a, uint8 *raw, uint32 raw_len, int out_n, int i
    stbi_png_partial = 0;
 
    // deinterlacing
-   final = malloc(a->s.img_x * a->s.img_y * out_n);
+   uint8 *final = (uint8 *)malloc(a->s.img_x * a->s.img_y * out_n);
    for (p=0; p < 7; ++p) {
       int xorig[] = { 0,4,0,2,0,1,0 };
       int yorig[] = { 0,0,4,0,2,0,1 };
